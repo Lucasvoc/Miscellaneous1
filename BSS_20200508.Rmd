@@ -1,0 +1,511 @@
+---
+title: "BSS_20200508"
+output: html_notebook
+---
+
+In order to use the R package $Knockoff$, we implemented a part of our simulations in R.
+
+### Preparations
+```{r message=FALSE}
+library(mvtnorm)
+library(knockoff)
+```
+
+### Function: Generating Gaussian Samples
+```{r}
+generate_normaldata<-function(n,p,rho,SNR,beta0){
+  sigma<-matrix(nr=p,nc=p)
+  for(i in c(1:p)){
+    for(j in c(1:p)){
+      sigma[i,j]<-rho^(abs(i-j))
+    }
+  }
+  mu1<-seq(length=p,from=0,to=0)
+  X<-rmvnorm(n,mu1,sigma)
+  X<-as.data.frame(X)
+  for(i in c(1:p)){
+    X[,i]<-X[,i]-mean(X[,i])
+    tt<-sqrt(X[,i]%*%X[,i])
+    X[,i]<-X[,i]/tt
+  }
+  X<-as.matrix(X)
+  tt1<-t(beta0)%*%sigma%*%beta0
+  sigma_square<-tt1/SNR
+  I<-diag(1,nr=n,nc=n)
+  new_sigma<-as.numeric(sigma_square)*I
+  Y<-rmvnorm(1,X%*%beta0,new_sigma)
+  return(list(X,Y))
+}
+```
+
+### Function: Metrics--FDR,TPR
+```{r}
+FDR<-function(betahat,s){
+  return(length(which(betahat>s))/length(betahat))
+}
+TPR<-function(betahat,s){
+  return(length(which(1:s %in% betahat))/s)
+} 
+```
+
+### Test: Metrics
+```{r}
+
+```
+
+### Set $FDR$ control's
+```{r}
+FDR_control<-seq(0.34,0.7,0.04)
+```
+
+### Actual Tests
+#### Test 1: Low Setting, High-Noise, $\rho$ = 0.35
+```{r warning=FALSE}
+# Store FDR and TPR
+TPR_1<-rep(0,10)
+FDR_1<-rep(0,10)
+# Set generate parameters 1
+n=100
+p=50
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.35
+Sigma=toeplitz(rho^(0:(p-1)))
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=45,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10**0.05)
+for(i in 1:10){
+  TPR_1_temp<-rep(0,100)
+  FDR_1_temp<-rep(0,100)
+  for (j in 1:100) {
+    X = matrix(rnorm(n*p),n) %*% chol(Sigma)
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_1_temp[j]<-TPR(beta_knock,s)
+       FDR_1_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_1[i]<-mean(TPR_1_temp)
+  FDR_1[i]<-mean(FDR_1_temp)
+}
+print('FDR_1:')
+print(FDR_1)
+print('TPR_1')
+print(TPR_1)
+```
+
+#### Test 2: Low Setting, High-Noise, $\rho$ = 0.70
+```{r warning=FALSE}
+# Store FDR and TPR
+TPR_2<-rep(0,10)
+FDR_2<-rep(0,10)
+# Set generate parameters 1
+n=100
+p=50
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.7
+Sigma=toeplitz(rho^(0:(p-1)))
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=45,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10**0.05)
+for(i in 1:10){
+  TPR_2_temp<-rep(0,100)
+  FDR_2_temp<-rep(0,100)
+  for (j in 1:100) {
+    X = matrix(rnorm(n*p),n) %*% chol(Sigma)
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_2_temp[j]<-TPR(beta_knock,s)
+       FDR_2_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_2[i]<-mean(TPR_2_temp)
+  FDR_2[i]<-mean(FDR_2_temp)
+}
+print('FDR_2:')
+print(FDR_2)
+print('TPR_2:')
+print(TPR_2)
+```
+
+#### Test 3: Low Setting, Medium-Noise, $\rho$ = 0.35
+```{r warning=FALSE}
+# Store FDR and TPR
+TPR_3<-rep(0,10)
+FDR_3<-rep(0,10)
+# Set generate parameters 1
+n=100
+p=50
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.35
+Sigma=toeplitz(rho^(0:(p-1)))
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=45,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10)
+for(i in 1:10){
+  TPR_3_temp<-rep(0,100)
+  FDR_3_temp<-rep(0,100)
+  for (j in 1:100) {
+    X = matrix(rnorm(n*p),n) %*% chol(Sigma)
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_3_temp[j]<-TPR(beta_knock,s)
+       FDR_3_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_3[i]<-mean(TPR_3_temp)
+  FDR_3[i]<-mean(FDR_3_temp)
+}
+print('FDR_3:')
+print(FDR_3)
+print('TPR_3:')
+print(TPR_3)
+```
+
+#### Test 4: Low Setting, Medium-Noise, $\rho$ = 0.70
+```{r warning=FALSE}
+# Store FDR and TPR
+TPR_4<-rep(0,10)
+FDR_4<-rep(0,10)
+# Set generate parameters 1
+n=100
+p=50
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.7
+Sigma=toeplitz(rho^(0:(p-1)))
+Lmatrix=chol(Sigma)
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=45,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10)
+for(i in 1:10){
+  TPR_4_temp<-rep(0,100)
+  FDR_4_temp<-rep(0,100)
+  for (j in 1:20) {
+    X = matrix(rnorm(n*p),n) %*% Lmatrix
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_4_temp[j]<-TPR(beta_knock,s)
+       FDR_4_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_4[i]<-mean(TPR_4_temp)
+  FDR_4[i]<-mean(FDR_4_temp)
+}
+print('FDR_4:')
+print(FDR_4)
+print('TPR_4:')
+print(TPR_4)
+```
+
+#### Test 5: Low Setting, Low-Noise, $\rho$ = 0.35
+```{r warning=FALSE}
+# Store FDR and TPR
+TPR_5<-rep(0,10)
+FDR_5<-rep(0,10)
+# Set generate parameters 1
+n=100
+p=50
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.35
+Sigma=toeplitz(rho^(0:(p-1)))
+Lmatrix=chol(Sigma)
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=45,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10**6)
+for(i in 1:10){
+  TPR_5_temp<-rep(0,100)
+  FDR_5_temp<-rep(0,100)
+  for (j in 1:100) {
+    X = matrix(rnorm(n*p),n) %*% Lmatrix
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_5_temp[j]<-TPR(beta_knock,s)
+       FDR_5_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_5[i]<-mean(TPR_5_temp)
+  FDR_5[i]<-mean(FDR_5_temp)
+}
+print('FDR_5:')
+print(FDR_5)
+print('TPR_5:')
+print(TPR_5)
+```
+
+#### Test 6: Low Setting, Low-Noise, $\rho$ = 0.70
+```{r warning=FALSE}
+# Store FDR and TPR
+TPR_6<-rep(0,10)
+FDR_6<-rep(0,10)
+# Set generate parameters 1
+n=100
+p=50
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.7
+Sigma=toeplitz(rho^(0:(p-1)))
+Lmatrix=chol(Sigma)
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=45,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10**6)
+for(i in 1:10){
+  TPR_6_temp<-rep(0,100)
+  FDR_6_temp<-rep(0,100)
+  for (j in 1:100) {
+    X = matrix(rnorm(n*p),n) %*% Lmatrix
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_6_temp[j]<-TPR(beta_knock,s)
+       FDR_6_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_6[i]<-mean(TPR_6_temp)
+  FDR_6[i]<-mean(FDR_6_temp)
+}
+print('FDR_6:')
+print(FDR_6)
+print('TPR_6:')
+print(TPR_6)
+```
+
+```{r warning=FALSE}
+#### Test 7: Medium Setting, High-Noise, $\rho$ = 0.35
+# Store FDR and TPR
+TPR_7<-rep(0,10)
+FDR_7<-rep(0,10)
+# Set generate parameters 1
+n=500
+p=100
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.35
+Sigma=toeplitz(rho^(0:(p-1)))
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=95,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10**0.05)
+for(i in 1:10){
+  TPR_7_temp<-rep(0,100)
+  FDR_7_temp<-rep(0,100)
+  for (j in 1:100) {
+    X = matrix(rnorm(n*p),n) %*% chol(Sigma)
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_7_temp[j]<-TPR(beta_knock,s)
+       FDR_7_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_7[i]<-mean(TPR_7_temp)
+  FDR_7[i]<-mean(FDR_7_temp)
+}
+print('FDR_7:')
+print(FDR_7)
+print('TPR_7:')
+print(TPR_7)
+
+```
+
+```{r warning=FALSE}
+#### Test 8: Medium Setting, High-Noise, $\rho$ = 0.70
+# Store FDR and TPR
+TPR_8<-rep(0,10)
+FDR_8<-rep(0,10)
+# Set generate parameters 1
+n=500
+p=100
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.7
+Sigma=toeplitz(rho^(0:(p-1)))
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=95,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10**0.05)
+for(i in 1:10){
+  TPR_8_temp<-rep(0,100)
+  FDR_8_temp<-rep(0,100)
+  for (j in 1:100) {
+    X = matrix(rnorm(n*p),n) %*% chol(Sigma)
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_8_temp[j]<-TPR(beta_knock,s)
+       FDR_8_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_8[i]<-mean(TPR_8_temp)
+  FDR_8[i]<-mean(FDR_8_temp)
+}
+print('FDR_8:')
+print(FDR_8)
+print('TPR_8:')
+print(TPR_8)
+
+```
+
+
+```{r warning=FALSE}
+#### Test 9: Medium Setting, Medium-Noise, $\rho$ = 0.35
+# Store FDR and TPR
+TPR_9<-rep(0,10)
+FDR_9<-rep(0,10)
+# Set generate parameters 1
+n=500
+p=100
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.35
+Sigma=toeplitz(rho^(0:(p-1)))
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=95,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10)
+for(i in 1:10){
+  TPR_9_temp<-rep(0,100)
+  FDR_9_temp<-rep(0,100)
+  for (j in 1:20) {
+    X = matrix(rnorm(n*p),n) %*% chol(Sigma)
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_9_temp[j]<-TPR(beta_knock,s)
+       FDR_9_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_9[i]<-mean(TPR_9_temp)
+  FDR_9[i]<-mean(FDR_9_temp)
+}
+print('FDR_9:')
+print(FDR_9)
+print('TPR_9:')
+print(TPR_9)
+```
+
+```{r warning=FALSE}
+#### Test 10: Medium Setting, Medium-Noise, $\rho$ = 0.70
+# Store FDR and TPR
+TPR_10<-rep(0,10)
+FDR_10<-rep(0,10)
+# Set generate parameters 1
+n=500
+p=100
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.7
+Sigma=toeplitz(rho^(0:(p-1)))
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=95,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10)
+for(i in 1:10){
+  TPR_10_temp<-rep(0,100)
+  FDR_10_temp<-rep(0,100)
+  for (j in 1:20) {
+    X = matrix(rnorm(n*p),n) %*% chol(Sigma)
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_10_temp[j]<-TPR(beta_knock,s)
+       FDR_10_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_10[i]<-mean(TPR_10_temp)
+  FDR_10[i]<-mean(FDR_10_temp)
+}
+print('FDR_10:')
+print(FDR_10)
+print('TPR_10:')
+print(TPR_10)
+```
+
+```{r warning=FALSE}
+#### Test 11: Medium Setting, Low-Noise, $\rho$ = 0.35
+# Store FDR and TPR
+TPR_11<-rep(0,10)
+FDR_11<-rep(0,10)
+# Set generate parameters 1
+n=500
+p=100
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.35
+Sigma=toeplitz(rho^(0:(p-1)))
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=95,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10**6)
+for(i in 1:10){
+  TPR_11_temp<-rep(0,100)
+  FDR_11_temp<-rep(0,100)
+  for (j in 1:20) {
+    X = matrix(rnorm(n*p),n) %*% chol(Sigma)
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_11_temp[j]<-TPR(beta_knock,s)
+       FDR_11_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_11[i]<-mean(TPR_11_temp)
+  FDR_11[i]<-mean(FDR_11_temp)
+}
+print('FDR_11:')
+print(FDR_11)
+print('TPR_11:')
+print(TPR_11)
+```
+
+```{r warning=FALSE}
+#### Test 12: Medium Setting, Low-Noise, $\rho$ = 0.70
+# Store FDR and TPR
+TPR_12<-rep(0,10)
+FDR_12<-rep(0,10)
+# Set generate parameters 1
+n=500
+p=100
+s=5
+# Set generate parameters 2
+mu=rep(0,p)
+rho=0.7
+Sigma=toeplitz(rho^(0:(p-1)))
+beta0<-as.matrix(c(seq(length=5,from=1,to=1),seq(length=95,from=0,to=0)))
+sigma=sqrt(t(beta0)%*%Sigma%*%beta0/10**6)
+for(i in 1:10){
+  TPR_12_temp<-rep(0,100)
+  FDR_12_temp<-rep(0,100)
+  for (j in 1:20) {
+    X = matrix(rnorm(n*p),n) %*% chol(Sigma)
+    Y = X%*%beta0+rnorm(n,0,sigma)
+    beta_knock<-as.vector(unlist(knockoff.filter(X,Y,fdr=FDR_control[i])[7]))
+    if(length(beta_knock>0)){
+       TPR_12_temp[j]<-TPR(beta_knock,s)
+       FDR_12_temp[j]<-FDR(beta_knock,s)
+    }
+  }
+  print(i)
+  TPR_12[i]<-mean(TPR_12_temp)
+  FDR_12[i]<-mean(FDR_12_temp)
+}
+print('FDR_12:')
+print(FDR_12)
+print('TPR_12:')
+print(TPR_12)
+
+```

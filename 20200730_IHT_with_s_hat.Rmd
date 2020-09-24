@@ -1,0 +1,292 @@
+---
+title: "fc_after_iht_highdim"
+author: "WU,SHIHAO"
+date: "2020/7/22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knockoff)
+library(ggplot2)
+```
+
+## Function to generate circulant correlated multivariate Gaussian
+```{r }
+cor_matrix<-function(rho,p){
+  cor_matrix<-diag(p)
+  for (i in c(1:p)){
+    for (j in c(1:p)) {
+      if(rho^(abs(i-j))>=1e-8){
+        cor_matrix[i,j]<-rho^(abs(i-j))
+      }
+    }
+  }
+  return(cor_matrix)
+}
+
+generate_X<-function(n,p,rho){
+  X<-matrix(rnorm(n*p,0,1),nrow=n,ncol=p)
+  Sigma<-cor_matrix(rho,p)
+  eig<-eigen(Sigma)
+  Q<-eig$vectors
+  Lambda<-diag(eig$values)
+  Lambda_root<-Lambda^(1/2)
+  Sigma_root<-Q%*%Lambda_root%*%t(Q)
+  for (i in c(1:n)){
+    X[i,]<-X[i,]%*%Sigma_root
+  }
+  return(X)
+}
+
+
+```
+
+## Functions to calculate TPR and FDR
+```{r }
+TPR_FDR<-function(true_supp,estimated_supp){
+  S<-dim(true_supp)[1]
+  P<-dim(estimated_supp)[1]
+  TP=0
+  for (i in c(1:P)) {
+    for (j in c(1:S)) {
+      if((estimated_supp[i,1]==true_supp[j,1]) & (estimated_supp[i,2]==true_supp[j,2])){
+        TP=TP+1
+      }
+    }
+  }
+  FDR<-(P-TP)/P
+  TPR<-TP/S
+  TPR_FDR=list(TPR=TPR,FDR=FDR)
+  return(TPR_FDR)
+}
+```
+
+
+## My IHT Algorithm
+```{r}
+myiht<-function(X, Y, scale=TRUE, beta0, proj_size, expan_size, maxiter = 1e3, prec = 1e-7){
+  n=dim(X)[1]
+  p=dim(X)[2]
+  if ( scale==TRUE){
+    X=scale(X)
+  }
+  t=0
+  Sxx = t(X) %*% X / n
+  Sxy = t(X) %*% Y / n
+  beta_new = beta0
+  while (t < maxiter) {
+    
+    # find St
+    beta_old = beta_new
+    indt1 = which(beta_old != 0)
+    grad <- - Sxy + Sxx %*% beta_old
+    grad_sort <- sort(abs(grad), decreasing = TRUE)
+    indt2 <- which(abs(grad) >= grad_sort[expan_size])
+    indt<- union( indt1, indt2)
+    
+    # find new beta_hat
+    Xt <- X[, indt]
+    beta_mid<-rep(0,p)
+    beta_mid[indt]<- solve( t(Xt) %*% Xt) %*% t(Xt) %*% Y
+    beta_sort <- sort(abs(beta_mid), decreasing = TRUE)
+    indt_new = which(abs(beta_mid) >= beta_sort[proj_size])
+    
+    
+    Xnt <- X[, indt_new]
+    beta_new<- rep(0, p)
+    beta_new[new_indt]<- solve(t(Xnt) %*% Xnt) %*% t(Xnt) %*% Y
+    
+    # termination criterion
+    if(sum((beta_new - beta_old)^2) < prec * (sum((beta_old)^2) + 1)){
+      break
+    }
+    
+    t=t+1
+  }
+  
+  beta_iht = beta_new
+  index_est = which( beta_iht != 0)
+  sign_iht=c(sign(beta_iht))
+  estimate = cbind(index_est=index_est, sign_est=sign_iht)
+  
+  result<-list(estimate = estimate, iter_step = t)
+  return(result)
+}
+
+
+myiht2 <- function(X, Y, scale_X=TRUE, proj_size, expan_size, beta0, maxiter = 1e3, prec = 1e-7){
+  # iht_grad_recruiter: iterative hard thresholding with correction for linear regression
+  n = dim(X)[1]
+  p = dim(X)[2]
+  if (scale_X)  
+    X = scale(X)
+  Sxx = t(X) %*% X / n
+  Sxy = t(X) %*% Y / n
+
+  
+  t = 0
+  betat = beta0
+  
+  while (t < maxiter){
+    beta_old = betat
+    grad = - Sxy + Sxx %*% beta_old
+    indt1 = which(beta_old != 0)
+    grad_1 = grad
+  
+    #grad_1[indt1] = 0   # ?????
+    grad_sort = sort(abs(grad_1), decreasing=TRUE)
+    indt2 = which(abs(grad_1) >= grad_sort[expan_size])
+    indt = union(indt1, indt2)
+          
+    # refit 1
+    if (length(indt)!=0){
+      Xt = X[, indt]
+      betat = rep(0, p)
+      betat[indt] = solve(t(Xt) %*% Xt) %*% (t(Xt) %*% Y)
+    }
+                
+    # truncation 
+    betat_sort = sort(abs(betat), decreasing=TRUE)
+    indt0 = which(abs(betat) >= betat_sort[proj_size])
+            
+    # refit 2
+    if (length(indt0) !=0){
+      Xt0 = X[, indt0]
+      betat = rep(0, p)
+      betat[indt0] = solve(t(Xt0) %*% Xt0) %*% (t(Xt0) %*% Y)
+    }
+            
+    # identify convergence condition
+    if (sum((betat - beta_old)^2) < prec * (sum((beta_old)^2) + 1)) 
+       break
+       t = t + 1
+  }
+
+  beta_iht = betat
+  index_iht = which(beta_iht != 0)
+  sign_iht = c(sign(solve(t(X[, index_iht]) %*% X[, index_iht]) %*% t(X[, index_iht]) %*% Y))
+  dir_estimate = cbind(index_iht, sign_iht)
+  
+  grad_iht = - Sxy + Sxx %*% betat
+
+  result = list(dir_estimate = dir_estimate, grad= grad_iht, step = t)
+  return(result)
+}
+
+
+```
+
+
+
+
+
+
+## Test s_list and g_list
+```{r }
+iht_chart1_fdr<-matrix('error',nrow=8,ncol=8)
+iht_chart1_tpr<-matrix('error',nrow=8,ncol=8)
+parameter<-seq(from=30,to=100,by=10)
+colnames(iht_chart1_fdr)<-parameter
+colnames(iht_chart1_tpr)<-parameter
+rownames(iht_chart1_fdr)<-parameter
+rownames(iht_chart1_tpr)<-parameter
+X<-generate_X(600,1000,0.4)
+index<-cbind(sample(c(1:1000),50,replace = F),sample(c(-1,1),50,replace=T))
+beta<-rep(0,1000)
+beta[index[,1]]<-0.5*index[,2]
+Y<-X%*%beta+rnorm(600,0,1)
+for (i in c(1:8)){
+  for (j in c(i:8)) {
+    TPR = rep(0,10)
+    FDR = rep(0,10)
+    for (k in c(1:50)) {
+      index<-cbind(sample(c(1:1000),50,replace = F),sample(c(-1,1),50,replace=T))
+      beta<-rep(0,1000)
+      beta[index[,1]]<-0.5*index[,2]
+      Y<-X%*%beta+rnorm(600,0,1)
+      estimate<-myiht2(X, Y, scale_X=TRUE, proj_size=parameter[i], expan_size=parameter[j], beta0, maxiter = 1e3, prec = 1e-7)$dir_estimate
+      FDR[k] <- TPR_FDR(index,estimate)$FDR
+      TPR[k] <- TPR_FDR(index,estimate)$TPR
+    }
+    iht_chart1_fdr[i,j]<-mean(FDR)
+    iht_chart1_tpr[i,j]<-mean(TPR)
+  }
+}
+
+iht_chart1_fdr
+iht_chart1_tpr
+
+
+
+```
+
+```{r }
+iht_chart2_fdr<-matrix('error',nrow=8,ncol=8)
+iht_chart2_tpr<-matrix('error',nrow=8,ncol=8)
+parameter<-seq(from=30,to=100,by=10)
+colnames(iht_chart2_fdr)<-parameter
+colnames(iht_chart2_tpr)<-parameter
+rownames(iht_chart2_fdr)<-parameter
+rownames(iht_chart2_tpr)<-parameter
+X<-generate_X(600,1000,0.4)
+for (i in c(1:8)){
+  for (j in c(i:8)) {
+    TPR = rep(0,10)
+    FDR = rep(0,10)
+    for (k in c(1:50)) {
+      index<-cbind(sample(c(1:1000),50,replace = F),sample(c(-1,1),50,replace=T))
+      beta<-rep(0,1000)
+      beta[index[,1]]<-0.05*index[,2]
+      Y<-X%*%beta+rnorm(600,0,1)
+      estimate<-myiht2(X, Y, scale_X=TRUE, proj_size=parameter[i], expan_size=parameter[j], beta0, maxiter = 1e3, prec = 1e-7)$dir_estimate
+      FDR[k] <- TPR_FDR(index,estimate)$FDR
+      TPR[k] <- TPR_FDR(index,estimate)$TPR
+    }
+    iht_chart2_fdr[i,j]<-mean(FDR)
+    iht_chart2_tpr[i,j]<-mean(TPR)
+  }
+}
+
+iht_chart2_fdr
+iht_chart2_tpr
+
+
+
+
+```
+
+```{r }
+iht_chart3_fdr<-matrix('error',nrow=8,ncol=8)
+iht_chart3_tpr<-matrix('error',nrow=8,ncol=8)
+parameter<-seq(from=30,to=100,by=10)
+colnames(iht_chart3_fdr)<-parameter
+colnames(iht_chart3_tpr)<-parameter
+rownames(iht_chart3_fdr)<-parameter
+rownames(iht_chart3_tpr)<-parameter
+X<-generate_X(600,1000,0.4)
+for (i in c(1:8)){
+  for (j in c(i:8)) {
+    TPR = rep(0,10)
+    FDR = rep(0,10)
+    for (k in c(1:20)) {
+      index<-cbind(sample(c(1:1000),50,replace = F),sample(c(-1,1),50,replace=T))
+      beta<-rep(0,1000)
+      beta[index[,1]]<-0.2*index[,2]
+      Y<-X%*%beta+rnorm(600,0,1)
+      estimate<-myiht2(X, Y, scale_X=TRUE, proj_size=parameter[i], expan_size=parameter[j], beta0=rep(0,1000), maxiter = 1e3, prec = 1e-7)$dir_estimate
+      FDR[k] <- TPR_FDR(index,estimate)$FDR
+      TPR[k] <- TPR_FDR(index,estimate)$TPR
+    }
+    iht_chart3_fdr[i,j]<-mean(FDR)
+    iht_chart3_tpr[i,j]<-mean(TPR)
+  }
+}
+
+iht_chart3_fdr
+iht_chart3_tpr
+
+
+
+
+```

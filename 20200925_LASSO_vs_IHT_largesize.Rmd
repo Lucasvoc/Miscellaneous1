@@ -1,0 +1,303 @@
+---
+title: "iht_tune"
+author: "WU,SHIHAO"
+date: "2020/7/29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(glmnet)
+```
+
+## Function to generate circulant correlated multivariate Gaussian
+```{r }
+cor_matrix<-function(rho,p){
+  cor_matrix<-diag(p)
+  for (i in c(1:p)){
+    for (j in c(1:p)) {
+      if(rho^(abs(i-j))>=1e-8){
+        cor_matrix[i,j]<-rho^(abs(i-j))
+      }
+    }
+  }
+  return(cor_matrix)
+}
+
+generate_X<-function(n,p,rho, Sigma = NULL){
+  X<-matrix(rnorm(n*p,0,1),nrow=n,ncol=p)
+  if(is.null(Sigma)){
+    Sigma<-cor_matrix(rho,p)
+  }
+  eig<-eigen(Sigma)
+  Q<-eig$vectors
+  Lambda<-diag(eig$values)
+  Lambda_root<-Lambda^(1/2)
+  Sigma_root<-Q%*%Lambda_root%*%t(Q)
+  X <- X %*% Sigma_root
+  return(X)
+}
+
+
+```
+
+## Metrics
+```{r }
+####
+#### FDR-TPR
+
+TPR_FDR<-function(true_supp,estimated_supp){
+  S<-dim(true_supp)[1]
+  P<-dim(estimated_supp)[1]
+  TP=0
+  for (i in c(1:P)) {
+    for (j in c(1:S)) {
+      if((estimated_supp[i,1]==true_supp[j,1]) & (estimated_supp[i,2]==true_supp[j,2])){
+        TP=TP+1
+      }
+    }
+  }
+  FDR<-(P-TP)/P
+  TPR<-TP/S
+  TPR_FDR=list(TPR=TPR,FDR=FDR)
+  return(TPR_FDR)
+}
+
+TPR_FDR_undir <- function(beta0, betahat){
+  true_supp <- which(beta0 != 0)
+  estimated_supp <- which(betahat != 0)
+  S <- length(true_supp)
+  P <- length(estimated_supp)
+  if(P==0){
+    TPR = 1
+    FDR = 0
+    TPR_FDR = list(TPR = TPR, FDR = FDR)
+    return(TPR_FDR)
+  }
+  TP = 0
+  for (i in c(1:P)) {
+    if(estimated_supp[i] %in% true_supp){
+      TP=TP+1
+    }
+  }
+  FDR <- (P-TP)/P
+  TPR <- TP/S
+  TPR_FDR = list(TPR=TPR, FDR=FDR)
+  return(TPR_FDR)
+}
+
+
+
+
+####
+#### Relative Risk and absolute risk
+re_risk <- function(beta_hat, beta0, Sigma, ab_risk = NULL){
+  if (is.null(ab_risk)){
+    return( t( beta_hat - beta0 ) %*% Sigma %*% (beta_hat - beta0)/ ((t(beta0) %*% Sigma %*% beta0)) )
+  }
+  return( ab_risk/(t(beta0) %*% Sigma %*% beta0) )
+}
+
+ab_risk <- function(beta_hat, beta0, Sigma){
+  return( t( beta_hat - beta0 ) %*% Sigma %*% (beta_hat - beta0) )
+}
+
+re_test_err <- function(betahat, beta0, Sigma, sigma2){
+  return(( t(betahat-beta0)%*%Sigma%*%(betahat-beta0) + sigma2)/sigma2)
+}
+```
+
+
+## My IHT
+```{r }
+myiht2 <- function(X, Y, scale_X=TRUE, proj_size, expan_size, beta0, maxiter = 1e3, prec = 1e-7){
+  # iht_grad_recruiter: iterative hard thresholding with correction for linear regression
+  n = dim(X)[1]
+  p = dim(X)[2]
+  if (scale_X)  
+    X = scale(X)
+  Sxx = t(X) %*% X / n
+  Sxy = t(X) %*% Y / n
+
+  
+  t = 0
+  betat = beta0
+  
+  while (t < maxiter){
+    beta_old = betat
+    grad = - Sxy + Sxx %*% beta_old
+    indt1 = which(beta_old != 0)
+    grad_1 = grad
+  
+    #grad_1[indt1] = 0   # ?????
+    grad_sort = sort(abs(grad_1), decreasing=TRUE)
+    indt2 = which(abs(grad_1) >= grad_sort[expan_size])
+    indt = union(indt1, indt2)
+          
+    # refit 1
+    if (length(indt)!=0){
+      Xt = X[, indt]
+      betat = rep(0, p)
+      betat[indt] = solve(t(Xt) %*% Xt) %*% (t(Xt) %*% Y)
+    }
+                
+    # truncation 
+    betat_sort = sort(abs(betat), decreasing=TRUE)
+    indt0 = which(abs(betat) >= betat_sort[proj_size])
+            
+    # refit 2
+    if (length(indt0) !=0){
+      Xt0 = X[, indt0]
+      betat = rep(0, p)
+      betat[indt0] = solve(t(Xt0) %*% Xt0) %*% (t(Xt0) %*% Y)
+    }
+            
+    # identify convergence condition
+    if (sum((betat - beta_old)^2) < prec * (sum((beta_old)^2) + 1)) 
+       break
+       t = t + 1
+  }
+
+  beta_iht = betat
+  index_iht = which(beta_iht != 0)
+  sign_iht = c(sign(solve(t(X[, index_iht]) %*% X[, index_iht]) %*% t(X[, index_iht]) %*% Y))
+  dir_estimate = cbind(index_iht, sign_iht)
+  
+  grad_iht = - Sxy + Sxx %*% betat
+
+  result = list(dir_estimate = dir_estimate, grad= grad_iht, step = t)
+  return(result)
+}
+
+```
+
+
+```{r}
+SNR <- c(0.71,0.79,0.86,0.97,1.05,1.17,1.22,2.07,3.52,6.00)
+```
+
+
+## 1_Low0.00
+```{r warning=FALSE}
+#########################################################
+#########################################################
+#########################################################
+
+
+## Generate beta and Sigma/sigma
+beta0 <- rep(0,1000)
+beta0[c(1:50)] <- 1
+Sigma <- cor_matrix(0,1000)
+sigma2<-t(beta0)%*%Sigma%*%beta0/10**(SNR)
+
+
+## Store the results
+result1RR <- as.data.frame(matrix(0, nrow = 20, ncol = 4))
+names(result1RR) <- c('method', 'SNR', 'mean', 'sd')
+result1RR[1:10,1] <- 'LASSO'
+result1RR[11:20,1] <- 'BSS'
+result1RR[,2] <- c(SNR, SNR)
+
+result1FDR <- as.data.frame(matrix(0, nrow = 20, ncol = 4))
+names(result1FDR) <- c('method', 'SNR', 'mean', 'sd')
+result1FDR[1:10,1] <- 'LASSO'
+result1FDR[11:20,1] <- 'BSS'
+result1FDR[,2] <- c(SNR, SNR)
+
+result1TPR <- as.data.frame(matrix(0, nrow = 20, ncol = 4))
+names(result1TPR) <- c('method', 'SNR', 'mean', 'sd')
+result1TPR[1:10,1] <- 'LASSO'
+result1TPR[11:20,1] <- 'BSS'
+result1TPR[,2] <- c(SNR, SNR)
+
+## begin the test
+for (i in c(1:length(SNR))) {
+  X_test <- generate_X(700, 1000, Sigma = Sigma)
+  Y_test <- X_test%*%beta0+as.matrix(rnorm(700,0,sigma2[i]))
+  intLASSORR <- rep(0,10)
+  intLASSOFDR <- rep(0,10)
+  intLASSOTPR <- rep(0,10)
+  intBSSRR <- rep(0,10)
+  intBSSFDR <- rep(0,10)
+  intBSSTPR <- rep(0,10)
+  
+  ## 10 repititions
+  for (j in c(1:10)) {
+    X_train <- generate_X(700, 1000, Sigma = Sigma)
+    Y_train <- X_train%*%beta0+as.matrix(rnorm(700,0,sigma2[i]))
+    
+    ## solve LASSO
+    fit <- glmnet(X_train, Y_train, family = 'gaussian', type.measure = 'mse', intercept = F)$beta
+    nlambda <- dim(fit)[2]
+    tune_lasso <- rep(0,nlambda)
+    for (m in c(1:nlambda)) {
+      tune_lasso[m] <- norm(1/700*(Y_test-X_test%*%fit[,m]), type='2')
+    }
+    sol_LASSO <- fit[,which(tune_lasso == min(tune_lasso))]
+    
+    ## solve BSS
+    estimate <- myiht2(X = X_train, Y = Y_train, proj_size = 50, expan_size = 50, beta0=rep(0,1000))$dir_estimate
+    sol_BSS = rep(0,1000)
+    Xs <- X_train[, estimate[,1]]
+    sol_BSS[estimate[,1]] = solve(t(Xs)%*%Xs)%*%t(Xs)%*%Y_train
+
+    
+    
+    intLASSORR[j] <- re_risk(sol_LASSO, beta0, Sigma)
+    intLASSOFDR[j] <- TPR_FDR_undir(beta0, sol_LASSO)$FDR
+    intLASSOTPR[j] <- TPR_FDR_undir(beta0, sol_LASSO)$TPR
+    intBSSRR[j] <- re_risk(sol_BSS, beta0, Sigma)
+    intBSSFDR[j] <- TPR_FDR_undir(beta0, sol_BSS)$FDR
+    intBSSTPR[j] <- TPR_FDR_undir(beta0, sol_BSS)$TPR
+  }
+  result1TPR[i,3] <- mean(intLASSOTPR)
+  result1TPR[i,4] <- sd(intLASSOTPR)/sqrt(10)
+  result1TPR[i+10,3] <- mean(intBSSTPR)
+  result1TPR[i+10,4] <- sd(intBSSTPR)/sqrt(10)
+  result1FDR[i,3] <- mean(intLASSOFDR)
+  result1FDR[i,4] <- sd(intLASSOFDR)/sqrt(10)
+  result1FDR[i+10,3] <- mean(intBSSFDR)
+  result1FDR[i+10,4] <- sd(intBSSFDR)/sqrt(10)
+  result1RR[i,3] <- mean(intLASSORR)
+  result1RR[i,4] <- sd(intLASSORR)/sqrt(10)
+  result1RR[i+10,3] <- mean(intBSSRR)
+  result1RR[i+10,4] <- sd(intBSSRR)/sqrt(10)
+}
+```
+
+
+
+
+
+
+
+
+
+
+#### PLOTS1
+```{r}
+result1RR[,2] <- as.character(result1RR[,2])
+p1_1<-ggplot(result1RR, aes(x=SNR, y=mean, colour=method, group = method)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("")+theme(plot.title = element_text(hjust = 0.5))+xlab('Signal-to-noise ratio')+ylab('Relative risk')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL)) + ylim(0,1.5)
+
+result1TPR[,2] <- as.character(result1TPR[,2])
+p1_2<-ggplot(result1TPR, aes(x=SNR, y=mean, colour=method, group = method)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("")+theme(plot.title = element_text(hjust = 0.5))+xlab('Signal-to-noise ratio')+ylab('True positive rate')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL)) + ylim(0,1)
+
+result1FDR[,2] <- as.character(result1FDR[,2])
+p1_3<-ggplot(result1FDR, aes(x=SNR, y=mean, colour=method, group = method)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("")+theme(plot.title = element_text(hjust = 0.5))+xlab('Signal-to-noise ratio')+ylab('False discovery rate')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL)) + ylim(0,1)
+
+
+
+
+
+```
+

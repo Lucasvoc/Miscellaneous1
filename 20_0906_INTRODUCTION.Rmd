@@ -1,0 +1,232 @@
+---
+title: "iht_tune"
+author: "WU,SHIHAO"
+date: "2020/7/29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+```
+
+## Function to generate circulant correlated multivariate Gaussian
+```{r }
+cor_matrix<-function(rho,p){
+  cor_matrix<-diag(p)
+  for (i in c(1:p)){
+    for (j in c(1:p)) {
+      if(rho^(abs(i-j))>=1e-8){
+        cor_matrix[i,j]<-rho^(abs(i-j))
+      }
+    }
+  }
+  return(cor_matrix)
+}
+
+generate_X<-function(n,p,rho, Sigma = NULL){
+  X<-matrix(rnorm(n*p,0,1),nrow=n,ncol=p)
+  if(is.null(Sigma)){
+    Sigma<-cor_matrix(rho,p)
+  }
+  eig<-eigen(Sigma)
+  Q<-eig$vectors
+  Lambda<-diag(eig$values)
+  Lambda_root<-Lambda^(1/2)
+  Sigma_root<-Q%*%Lambda_root%*%t(Q)
+  X <- X %*% Sigma_root
+  return(X)
+}
+
+
+```
+
+## Metrics
+```{r }
+####
+#### FDR-TPR
+
+TPR_FDR<-function(true_supp,estimated_supp){
+  S<-dim(true_supp)[1]
+  P<-dim(estimated_supp)[1]
+  TP=0
+  for (i in c(1:P)) {
+    for (j in c(1:S)) {
+      if((estimated_supp[i,1]==true_supp[j,1]) & (estimated_supp[i,2]==true_supp[j,2])){
+        TP=TP+1
+      }
+    }
+  }
+  FDR<-(P-TP)/P
+  TPR<-TP/S
+  TPR_FDR=list(TPR=TPR,FDR=FDR)
+  return(TPR_FDR)
+}
+
+####
+#### Relative Risk and absolute risk
+re_risk <- function(beta_hat, beta0, Sigma, ab_risk = NULL){
+  if (is.null(ab_risk)){
+    return( t( beta_hat - beta0 ) %*% Sigma %*% (beta_hat - beta0)/ ((t(beta0) %*% Sigma %*% beta0)) )
+  }
+  return( ab_risk/(t(beta0) %*% Sigma %*% beta0) )
+}
+
+ab_risk <- function(beta_hat, beta0, Sigma){
+  return( t( beta_hat - beta0 ) %*% Sigma %*% (beta_hat - beta0) )
+}
+```
+
+
+## My IHT
+```{r }
+myiht2 <- function(X, Y, scale_X=TRUE, proj_size, expan_size, beta0, maxiter = 1e3, prec = 1e-7){
+  # iht_grad_recruiter: iterative hard thresholding with correction for linear regression
+  n = dim(X)[1]
+  p = dim(X)[2]
+  if (scale_X)  
+    X = scale(X)
+  Sxx = t(X) %*% X / n
+  Sxy = t(X) %*% Y / n
+
+  
+  t = 0
+  betat = beta0
+  
+  while (t < maxiter){
+    beta_old = betat
+    grad = - Sxy + Sxx %*% beta_old
+    indt1 = which(beta_old != 0)
+    grad_1 = grad
+  
+    #grad_1[indt1] = 0   # ?????
+    grad_sort = sort(abs(grad_1), decreasing=TRUE)
+    indt2 = which(abs(grad_1) >= grad_sort[expan_size])
+    indt = union(indt1, indt2)
+          
+    # refit 1
+    if (length(indt)!=0){
+      Xt = X[, indt]
+      betat = rep(0, p)
+      betat[indt] = solve(t(Xt) %*% Xt) %*% (t(Xt) %*% Y)
+    }
+                
+    # truncation 
+    betat_sort = sort(abs(betat), decreasing=TRUE)
+    indt0 = which(abs(betat) >= betat_sort[proj_size])
+            
+    # refit 2
+    if (length(indt0) !=0){
+      Xt0 = X[, indt0]
+      betat = rep(0, p)
+      betat[indt0] = solve(t(Xt0) %*% Xt0) %*% (t(Xt0) %*% Y)
+    }
+            
+    # identify convergence condition
+    if (sum((betat - beta_old)^2) < prec * (sum((beta_old)^2) + 1)) 
+       break
+       t = t + 1
+  }
+
+  beta_iht = betat
+  index_iht = which(beta_iht != 0)
+  sign_iht = c(sign(solve(t(X[, index_iht]) %*% X[, index_iht]) %*% t(X[, index_iht]) %*% Y))
+  dir_estimate = cbind(index_iht, sign_iht)
+  
+  grad_iht = - Sxy + Sxx %*% betat
+
+  result = list(dir_estimate = dir_estimate, grad= grad_iht, step = t)
+  return(result)
+}
+
+```
+
+
+
+## Test relative risk
+```{r warning=FALSE}
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- c(1:100)
+result_model <- as.data.frame(matrix(0, nrow = 200, ncol = 4))
+result_pre <- as.data.frame(matrix(0, nrow = 100, ncol = 3))
+names(result_model) <- c('measure', 'Sparsity', 'mean', 'sd')
+names(result_pre) <- c('Sparsity', 'mean', 'sd')
+result_model[1:100,1] <- 'FDR'
+result_model[101:200,1] <- 'TPR'
+result_model[,2] <- c(S, S)
+result_pre[,1] <- S
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.1, 1000)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(700, 1000, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  ARISK_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:1000),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,1000)
+    beta[index[,1]] <- 4.5*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(700,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,1000))$dir_estimate
+    # compute betahat
+    betahat = rep(0,1000)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+    ARISK_int[j] = log(ab_risk(beta_hat = betahat, beta0 = beta, Sigma = Sigma),10)
+  }
+  # store the results
+  result_model[i,3] <- mean(FDR_int)
+  result_model[i,4] <- sd(FDR_int)/sqrt(20)
+  result_model[i+100,3] <- mean(TPR_int)
+  result_model[i+100,4] <- sd(TPR_int)/sqrt(20)
+  result_pre[i,3] <- mean(ARISK_int)
+  result_pre[i,4] <- sd(ARISK_int)/sqrt(20)
+  print(result_model)
+}
+```
+
+
+
+
+
+
+
+#### PLOTS
+```{r}
+p1<-ggplot(result_model, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("FDR-TPR  path")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p2<-ggplot(result_pre, aes(x=Sparsity, y=mean,colour = measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + 
+  ggtitle("Absolute Risk v.s. Sparsity")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('log(AR)')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+
+
+
+
+```

@@ -1,0 +1,632 @@
+---
+title: "iht_tune"
+author: "WU,SHIHAO"
+date: "2020/7/29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+```
+
+## Function to generate circulant correlated multivariate Gaussian
+```{r }
+cor_matrix<-function(rho,p){
+  cor_matrix<-diag(p)
+  for (i in c(1:p)){
+    for (j in c(1:p)) {
+      if(rho^(abs(i-j))>=1e-8){
+        cor_matrix[i,j]<-rho^(abs(i-j))
+      }
+    }
+  }
+  return(cor_matrix)
+}
+
+generate_X<-function(n,p,rho, Sigma = NULL){
+  X<-matrix(rnorm(n*p,0,1),nrow=n,ncol=p)
+  if(is.null(Sigma)){
+    Sigma<-cor_matrix(rho,p)
+  }
+  eig<-eigen(Sigma)
+  Q<-eig$vectors
+  Lambda<-diag(eig$values)
+  Lambda_root<-Lambda^(1/2)
+  Sigma_root<-Q%*%Lambda_root%*%t(Q)
+  X <- X %*% Sigma_root
+  return(X)
+}
+
+
+```
+
+## Metrics
+```{r }
+####
+#### FDR-TPR
+
+TPR_FDR<-function(true_supp,estimated_supp){
+  S<-dim(true_supp)[1]
+  P<-dim(estimated_supp)[1]
+  TP=0
+  for (i in c(1:P)) {
+    for (j in c(1:S)) {
+      if((estimated_supp[i,1]==true_supp[j,1]) & (estimated_supp[i,2]==true_supp[j,2])){
+        TP=TP+1
+      }
+    }
+  }
+  FDR<-(P-TP)/P
+  TPR<-TP/S
+  TPR_FDR=list(TPR=TPR,FDR=FDR)
+  return(TPR_FDR)
+}
+
+####
+#### Relative Risk and absolute risk
+re_risk <- function(beta_hat, beta0, Sigma, ab_risk = NULL){
+  if (is.null(ab_risk)){
+    return( t( beta_hat - beta0 ) %*% Sigma %*% (beta_hat - beta0)/ ((t(beta0) %*% Sigma %*% beta0)) )
+  }
+  return( ab_risk/(t(beta0) %*% Sigma %*% beta0) )
+}
+
+ab_risk <- function(beta_hat, beta0, Sigma){
+  return( t( beta_hat - beta0 ) %*% Sigma %*% (beta_hat - beta0) )
+}
+```
+
+
+## My IHT
+```{r }
+myiht2 <- function(X, Y, scale_X=TRUE, proj_size, expan_size, beta0, maxiter = 1e3, prec = 1e-7){
+  # iht_grad_recruiter: iterative hard thresholding with correction for linear regression
+  n = dim(X)[1]
+  p = dim(X)[2]
+  if (scale_X)  
+    X = scale(X)
+  Sxx = t(X) %*% X / n
+  Sxy = t(X) %*% Y / n
+
+  
+  t = 0
+  betat = beta0
+  
+  while (t < maxiter){
+    beta_old = betat
+    grad = - Sxy + Sxx %*% beta_old
+    indt1 = which(beta_old != 0)
+    grad_1 = grad
+  
+    #grad_1[indt1] = 0   # ?????
+    grad_sort = sort(abs(grad_1), decreasing=TRUE)
+    indt2 = which(abs(grad_1) >= grad_sort[expan_size])
+    indt = union(indt1, indt2)
+          
+    # refit 1
+    if (length(indt)!=0){
+      Xt = X[, indt]
+      betat = rep(0, p)
+      betat[indt] = solve(t(Xt) %*% Xt) %*% (t(Xt) %*% Y)
+    }
+                
+    # truncation 
+    betat_sort = sort(abs(betat), decreasing=TRUE)
+    indt0 = which(abs(betat) >= betat_sort[proj_size])
+            
+    # refit 2
+    if (length(indt0) !=0){
+      Xt0 = X[, indt0]
+      betat = rep(0, p)
+      betat[indt0] = solve(t(Xt0) %*% Xt0) %*% (t(Xt0) %*% Y)
+    }
+            
+    # identify convergence condition
+    if (sum((betat - beta_old)^2) < prec * (sum((beta_old)^2) + 1)) 
+       break
+       t = t + 1
+  }
+
+  beta_iht = betat
+  index_iht = which(beta_iht != 0)
+  sign_iht = c(sign(solve(t(X[, index_iht]) %*% X[, index_iht]) %*% t(X[, index_iht]) %*% Y))
+  dir_estimate = cbind(index_iht, sign_iht)
+  
+  grad_iht = - Sxy + Sxx %*% betat
+
+  result = list(dir_estimate = dir_estimate, grad= grad_iht, step = t)
+  return(result)
+}
+
+```
+
+
+
+## 1
+```{r warning=FALSE}
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(1,100,2)
+result1 <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+names(result1) <- c('measure', 'Sparsity', 'mean', 'sd')
+result1[1:50,1] <- 'FDR'
+result1[51:100,1] <- 'TPR'
+result1[,2] <- c(S, S)
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.1, 1000)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(700, 1000, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:1000),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,1000)
+    beta[index[,1]] <- 1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(700,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,1000))$dir_estimate
+    # compute betahat
+    betahat = rep(0,1000)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+  }
+  # store the results
+  result1[i,3] <- mean(FDR_int)
+  result1[i,4] <- sd(FDR_int)/sqrt(20)
+  result1[i+50,3] <- mean(TPR_int)
+  result1[i+50,4] <- sd(TPR_int)/sqrt(20)
+  print(result1)
+}
+```
+
+
+## 2
+```{r warning=FALSE}
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(1,100,2)
+result2 <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+names(result2) <- c('measure', 'Sparsity', 'mean', 'sd')
+result2[1:50,1] <- 'FDR'
+result2[51:100,1] <- 'TPR'
+result2[,2] <- c(S, S)
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.1, 1000)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(700, 1000, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:1000),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,1000)
+    beta[index[,1]] <- 0.2*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(700,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,1000))$dir_estimate
+    # compute betahat
+    betahat = rep(0,1000)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+  }
+  # store the results
+  result2[i,3] <- mean(FDR_int)
+  result2[i,4] <- sd(FDR_int)/sqrt(20)
+  result2[i+50,3] <- mean(TPR_int)
+  result2[i+50,4] <- sd(TPR_int)/sqrt(20)
+  print(result2)
+}
+```
+
+
+## 3,4
+```{r warning=FALSE}
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(1,100,2)
+result3 <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+names(result3) <- c('measure', 'Sparsity', 'mean', 'sd')
+result3[1:50,1] <- 'FDR'
+result3[51:100,1] <- 'TPR'
+result3[,2] <- c(S, S)
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.1, 1000)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(700, 1000, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:1000),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,1000)
+    beta[index[,1]] <- 0.1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(700,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,1000))$dir_estimate
+    # compute betahat
+    betahat = rep(0,1000)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+  }
+  # store the results
+  result3[i,3] <- mean(FDR_int)
+  result3[i,4] <- sd(FDR_int)/sqrt(20)
+  result3[i+50,3] <- mean(TPR_int)
+  result3[i+50,4] <- sd(TPR_int)/sqrt(20)
+  print(result3)
+}
+
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(1,100,2)
+result4 <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+names(result4) <- c('measure', 'Sparsity', 'mean', 'sd')
+result4[1:50,1] <- 'FDR'
+result4[51:100,1] <- 'TPR'
+result4[,2] <- c(S, S)
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.8, 1000)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(700, 1000, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:1000),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,1000)
+    beta[index[,1]] <- 1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(700,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,1000))$dir_estimate
+    # compute betahat
+    betahat = rep(0,1000)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+  }
+  # store the results
+  result4[i,3] <- mean(FDR_int)
+  result4[i,4] <- sd(FDR_int)/sqrt(20)
+  result4[i+50,3] <- mean(TPR_int)
+  result4[i+50,4] <- sd(TPR_int)/sqrt(20)
+  print(result4)
+}
+```
+
+## 5,6,7,8
+```{r warning=FALSE}
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(1,100,2)
+result5 <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+names(result5) <- c('measure', 'Sparsity', 'mean', 'sd')
+result5[1:50,1] <- 'FDR'
+result5[51:100,1] <- 'TPR'
+result5[,2] <- c(S, S)
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.1, 700)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+  }
+  # store the results
+  result5[i,3] <- mean(FDR_int)
+  result5[i,4] <- sd(FDR_int)/sqrt(20)
+  result5[i+50,3] <- mean(TPR_int)
+  result5[i+50,4] <- sd(TPR_int)/sqrt(20)
+  print(result5)
+}
+
+
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(1,100,2)
+result6 <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+names(result6) <- c('measure', 'Sparsity', 'mean', 'sd')
+result6[1:50,1] <- 'FDR'
+result6[51:100,1] <- 'TPR'
+result6[,2] <- c(S, S)
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.1, 700)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 0.2*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+  }
+  # store the results
+  result6[i,3] <- mean(FDR_int)
+  result6[i,4] <- sd(FDR_int)/sqrt(20)
+  result6[i+50,3] <- mean(TPR_int)
+  result6[i+50,4] <- sd(TPR_int)/sqrt(20)
+  print(result6)
+}
+
+
+
+```
+```{r}
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(1,100,2)
+result7 <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+names(result7) <- c('measure', 'Sparsity', 'mean', 'sd')
+result7[1:50,1] <- 'FDR'
+result7[51:100,1] <- 'TPR'
+result7[,2] <- c(S, S)
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.1, 700)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 0.1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+  }
+  # store the results
+  result7[i,3] <- mean(FDR_int)
+  result7[i,4] <- sd(FDR_int)/sqrt(20)
+  result7[i+50,3] <- mean(TPR_int)
+  result7[i+50,4] <- sd(TPR_int)/sqrt(20)
+  print(result7)
+}
+
+
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(1,100,2)
+result8 <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+names(result8) <- c('measure', 'Sparsity', 'mean', 'sd')
+result8[1:50,1] <- 'FDR'
+result8[51:100,1] <- 'TPR'
+result8[,2] <- c(S, S)
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.8, 700)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+  }
+  # store the results
+  result8[i,3] <- mean(FDR_int)
+  result8[i,4] <- sd(FDR_int)/sqrt(20)
+  result8[i+50,3] <- mean(TPR_int)
+  result8[i+50,4] <- sd(TPR_int)/sqrt(20)
+  print(result8)
+}
+```
+
+
+
+
+#### PLOTS
+```{r}
+p1<-ggplot(result1, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("Case 1")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+```
+```{r}
+p2<-ggplot(result2, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("Case 2")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+```
+```{r}
+
+p3<-ggplot(result3, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("Case 3")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+p4<-ggplot(result4, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("Case 4")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+```
+
+```{r}
+p5<-ggplot(result5, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("Case 5")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p6<-ggplot(result6, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("Case 6")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+```
+```{r}
+
+p7<-ggplot(result7, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("Case 7")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p8<-ggplot(result8, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("Case 8")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+```

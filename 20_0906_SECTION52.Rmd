@@ -1,0 +1,742 @@
+---
+title: "iht_tune"
+author: "WU,SHIHAO"
+date: "2020/7/29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+```
+
+## Function to generate circulant correlated multivariate Gaussian
+```{r }
+cor_matrix<-function(rho,p){
+  cor_matrix<-diag(p)
+  for (i in c(1:p)){
+    for (j in c(1:p)) {
+      if(rho^(abs(i-j))>=1e-8){
+        cor_matrix[i,j]<-rho^(abs(i-j))
+      }
+    }
+  }
+  return(cor_matrix)
+}
+
+generate_X<-function(n,p,rho, Sigma = NULL){
+  X<-matrix(rnorm(n*p,0,1),nrow=n,ncol=p)
+  if(is.null(Sigma)){
+    Sigma<-cor_matrix(rho,p)
+  }
+  eig<-eigen(Sigma)
+  Q<-eig$vectors
+  Lambda<-diag(eig$values)
+  Lambda_root<-Lambda^(1/2)
+  Sigma_root<-Q%*%Lambda_root%*%t(Q)
+  X <- X %*% Sigma_root
+  return(X)
+}
+
+
+```
+
+## Metrics
+```{r }
+####
+#### FDR-TPR
+
+TPR_FDR<-function(true_supp,estimated_supp){
+  S<-dim(true_supp)[1]
+  P<-dim(estimated_supp)[1]
+  TP=0
+  for (i in c(1:P)) {
+    for (j in c(1:S)) {
+      if((estimated_supp[i,1]==true_supp[j,1]) & (estimated_supp[i,2]==true_supp[j,2])){
+        TP=TP+1
+      }
+    }
+  }
+  FDR<-(P-TP)/P
+  TPR<-TP/S
+  TPR_FDR=list(TPR=TPR,FDR=FDR)
+  return(TPR_FDR)
+}
+
+####
+#### Relative Risk and absolute risk
+re_risk <- function(beta_hat, beta0, Sigma, ab_risk = NULL){
+  if (is.null(ab_risk)){
+    return( t( beta_hat - beta0 ) %*% Sigma %*% (beta_hat - beta0)/ ((t(beta0) %*% Sigma %*% beta0)) )
+  }
+  return( ab_risk/(t(beta0) %*% Sigma %*% beta0) )
+}
+
+ab_risk <- function(beta_hat, beta0, Sigma){
+  return( t( beta_hat - beta0 ) %*% Sigma %*% (beta_hat - beta0) )
+}
+```
+
+
+## My IHT
+```{r }
+myiht2 <- function(X, Y, scale_X=TRUE, proj_size, expan_size, beta0, maxiter = 1e3, prec = 1e-7){
+  # iht_grad_recruiter: iterative hard thresholding with correction for linear regression
+  n = dim(X)[1]
+  p = dim(X)[2]
+  if (scale_X)  
+    X = scale(X)
+  Sxx = t(X) %*% X / n
+  Sxy = t(X) %*% Y / n
+
+  
+  t = 0
+  betat = beta0
+  
+  while (t < maxiter){
+    beta_old = betat
+    grad = - Sxy + Sxx %*% beta_old
+    indt1 = which(beta_old != 0)
+    grad_1 = grad
+  
+    #grad_1[indt1] = 0   # ?????
+    grad_sort = sort(abs(grad_1), decreasing=TRUE)
+    indt2 = which(abs(grad_1) >= grad_sort[expan_size])
+    indt = union(indt1, indt2)
+          
+    # refit 1
+    if (length(indt)!=0){
+      Xt = X[, indt]
+      betat = rep(0, p)
+      betat[indt] = solve(t(Xt) %*% Xt) %*% (t(Xt) %*% Y)
+    }
+                
+    # truncation 
+    betat_sort = sort(abs(betat), decreasing=TRUE)
+    indt0 = which(abs(betat) >= betat_sort[proj_size])
+            
+    # refit 2
+    if (length(indt0) !=0){
+      Xt0 = X[, indt0]
+      betat = rep(0, p)
+      betat[indt0] = solve(t(Xt0) %*% Xt0) %*% (t(Xt0) %*% Y)
+    }
+            
+    # identify convergence condition
+    if (sum((betat - beta_old)^2) < prec * (sum((beta_old)^2) + 1)) 
+       break
+       t = t + 1
+  }
+
+  beta_iht = betat
+  index_iht = which(beta_iht != 0)
+  sign_iht = c(sign(solve(t(X[, index_iht]) %*% X[, index_iht]) %*% t(X[, index_iht]) %*% Y))
+  dir_estimate = cbind(index_iht, sign_iht)
+  
+  grad_iht = - Sxy + Sxx %*% betat
+
+  result = list(dir_estimate = dir_estimate, grad= grad_iht, step = t)
+  return(result)
+}
+
+```
+
+
+
+## 1,2,3,4
+```{r warning=FALSE}
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(2,100,2)
+result1_model <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+result1_pre <- as.data.frame(matrix(0, nrow = 50, ncol = 3))
+names(result1_model) <- c('measure', 'Sparsity', 'mean', 'sd')
+names(result1_pre) <- c('Sparsity', 'mean', 'sd')
+result1_model[1:50,1] <- 'FDR'
+result1_model[51:100,1] <- 'TPR'
+result1_model[,2] <- c(S, S)
+result1_pre[,1] <- S
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.2, 700)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  ARISK_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 2*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+    ARISK_int[j] = log(ab_risk(beta_hat = betahat, beta0 = beta, Sigma = Sigma),10)
+  }
+  # store the results
+  result1_model[i,3] <- mean(FDR_int)
+  result1_model[i,4] <- sd(FDR_int)/sqrt(20)
+  result1_model[i+50,3] <- mean(TPR_int)
+  result1_model[i+50,4] <- sd(TPR_int)/sqrt(20)
+  result1_pre[i,3] <- mean(ARISK_int)
+  result1_pre[i,4] <- sd(ARISK_int)/sqrt(20)
+  print(result1_model)
+}
+
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(2,100,2)
+result2_model <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+result2_pre <- as.data.frame(matrix(0, nrow = 50, ncol = 3))
+names(result2_model) <- c('measure', 'Sparsity', 'mean', 'sd')
+names(result2_pre) <- c('Sparsity', 'mean', 'sd')
+result2_model[1:50,1] <- 'FDR'
+result2_model[51:100,1] <- 'TPR'
+result2_model[,2] <- c(S, S)
+result2_pre[,1] <- S
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.2, 700)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  ARISK_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 0.2*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+    ARISK_int[j] = log(ab_risk(beta_hat = betahat, beta0 = beta, Sigma = Sigma),10)
+  }
+  # store the results
+  result2_model[i,3] <- mean(FDR_int)
+  result2_model[i,4] <- sd(FDR_int)/sqrt(20)
+  result2_model[i+50,3] <- mean(TPR_int)
+  result2_model[i+50,4] <- sd(TPR_int)/sqrt(20)
+  result2_pre[i,3] <- mean(ARISK_int)
+  result2_pre[i,4] <- sd(ARISK_int)/sqrt(20)
+  print(result2_model)
+}
+
+
+
+#### 5,6,7,8,9,10,11,12,13,14,15,16
+
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(2,100,2)
+result3_model <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+result3_pre <- as.data.frame(matrix(0, nrow = 50, ncol = 3))
+names(result3_model) <- c('measure', 'Sparsity', 'mean', 'sd')
+names(result3_pre) <- c('Sparsity', 'mean', 'sd')
+result3_model[1:50,1] <- 'FDR'
+result3_model[51:100,1] <- 'TPR'
+result3_model[,2] <- c(S, S)
+result3_pre[,1] <- S
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.1, 700)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  ARISK_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+    ARISK_int[j] = log(ab_risk(beta_hat = betahat, beta0 = beta, Sigma = Sigma),10)
+  }
+  # store the results
+  result3_model[i,3] <- mean(FDR_int)
+  result3_model[i,4] <- sd(FDR_int)/sqrt(20)
+  result3_model[i+50,3] <- mean(TPR_int)
+  result3_model[i+50,4] <- sd(TPR_int)/sqrt(20)
+  result3_pre[i,3] <- mean(ARISK_int)
+  result3_pre[i,4] <- sd(ARISK_int)/sqrt(20)
+  print(result3_model)
+}
+
+
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(2,100,2)
+result4_model <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+result4_pre <- as.data.frame(matrix(0, nrow = 50, ncol = 3))
+names(result4_model) <- c('measure', 'Sparsity', 'mean', 'sd')
+names(result4_pre) <- c('Sparsity', 'mean', 'sd')
+result4_model[1:50,1] <- 'FDR'
+result4_model[51:100,1] <- 'TPR'
+result4_model[,2] <- c(S, S)
+result4_pre[,1] <- S
+
+
+# covariance matrix
+Sigma <- cor_matrix(0.8, 700)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  ARISK_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+    ARISK_int[j] = log(ab_risk(beta_hat = betahat, beta0 = beta, Sigma = Sigma),10)
+  }
+  # store the results
+  result4_model[i,3] <- mean(FDR_int)
+  result4_model[i,4] <- sd(FDR_int)/sqrt(20)
+  result4_model[i+50,3] <- mean(TPR_int)
+  result4_model[i+50,4] <- sd(TPR_int)/sqrt(20)
+  result4_pre[i,3] <- mean(ARISK_int)
+  result4_pre[i,4] <- sd(ARISK_int)/sqrt(20)
+  print(result4_model)
+}
+
+
+
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(2,100,2)
+result5_model <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+result5_pre <- as.data.frame(matrix(0, nrow = 50, ncol = 3))
+names(result5_model) <- c('measure', 'Sparsity', 'mean', 'sd')
+names(result5_pre) <- c('Sparsity', 'mean', 'sd')
+result5_model[1:50,1] <- 'FDR'
+result5_model[51:100,1] <- 'TPR'
+result5_model[,2] <- c(S, S)
+result5_pre[,1] <- S
+
+
+# covariance matrix
+Sigma <- 0.9*diag(700)+matrix(0.1,nrow = 700, ncol = 700)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  ARISK_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+    ARISK_int[j] = log(ab_risk(beta_hat = betahat, beta0 = beta, Sigma = Sigma),10)
+  }
+  # store the results
+  result5_model[i,3] <- mean(FDR_int)
+  result5_model[i,4] <- sd(FDR_int)/sqrt(20)
+  result5_model[i+50,3] <- mean(TPR_int)
+  result5_model[i+50,4] <- sd(TPR_int)/sqrt(20)
+  result5_pre[i,3] <- mean(ARISK_int)
+  result5_pre[i,4] <- sd(ARISK_int)/sqrt(20)
+  print(result5_model)
+}
+
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(2,100,2)
+result6_model <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+result6_pre <- as.data.frame(matrix(0, nrow = 50, ncol = 3))
+names(result6_model) <- c('measure', 'Sparsity', 'mean', 'sd')
+names(result6_pre) <- c('Sparsity', 'mean', 'sd')
+result6_model[1:50,1] <- 'FDR'
+result6_model[51:100,1] <- 'TPR'
+result6_model[,2] <- c(S, S)
+result6_pre[,1] <- S
+
+
+# covariance matrix
+Sigma <- 0.5*diag(700)+matrix(0.5,nrow = 700, ncol = 700)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  ARISK_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+    ARISK_int[j] = log(ab_risk(beta_hat = betahat, beta0 = beta, Sigma = Sigma),10)
+  }
+  # store the results
+  result6_model[i,3] <- mean(FDR_int)
+  result6_model[i,4] <- sd(FDR_int)/sqrt(20)
+  result6_model[i+50,3] <- mean(TPR_int)
+  result6_model[i+50,4] <- sd(TPR_int)/sqrt(20)
+  result6_pre[i,3] <- mean(ARISK_int)
+  result6_pre[i,4] <- sd(ARISK_int)/sqrt(20)
+  print(result6_model)
+}
+
+
+
+##Generate Q
+M <- matrix(rnorm(1,mean=1,sd=1), nrow = 700, ncol = 700)
+Q <- eigen(M)$vectors
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(2,100,2)
+result7_model <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+result7_pre <- as.data.frame(matrix(0, nrow = 50, ncol = 3))
+names(result7_model) <- c('measure', 'Sparsity', 'mean', 'sd')
+names(result7_pre) <- c('Sparsity', 'mean', 'sd')
+result7_model[1:50,1] <- 'FDR'
+result7_model[51:100,1] <- 'TPR'
+result7_model[,2] <- c(S, S)
+result7_pre[,1] <- S
+
+
+# covariance matrix
+Gamma <- diag(700)
+Gamma[1,1] <- 1400
+Gamma[2,2] <- 700
+Sigma <- diag(700)+Q%*%Gamma%*%t(Q)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  ARISK_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+    ARISK_int[j] = log(ab_risk(beta_hat = betahat, beta0 = beta, Sigma = Sigma),10)
+  }
+  # store the results
+  result7_model[i,3] <- mean(FDR_int)
+  result7_model[i,4] <- sd(FDR_int)/sqrt(20)
+  result7_model[i+50,3] <- mean(TPR_int)
+  result7_model[i+50,4] <- sd(TPR_int)/sqrt(20)
+  result7_pre[i,3] <- mean(ARISK_int)
+  result7_pre[i,4] <- sd(ARISK_int)/sqrt(20)
+  print(result7_model)
+}
+
+
+#########################################################
+#########################################################
+#########################################################
+
+
+## store the results
+
+S <- seq(2,100,2)
+result8_model <- as.data.frame(matrix(0, nrow = 100, ncol = 4))
+result8_pre <- as.data.frame(matrix(0, nrow = 50, ncol = 3))
+names(result8_model) <- c('measure', 'Sparsity', 'mean', 'sd')
+names(result8_pre) <- c('Sparsity', 'mean', 'sd')
+result8_model[1:50,1] <- 'FDR'
+result8_model[51:100,1] <- 'TPR'
+result8_model[,2] <- c(S, S)
+result8_pre[,1] <- S
+
+
+# covariance matrix
+Gamma <- diag(700)
+Gamma[1,1] <- 2*sqrt(700)
+Gamma[2,2] <- sqrt(700)
+Sigma <- diag(700)+Q%*%Gamma%*%t(Q)
+
+## begin the test
+for (i in c(1:length(S))) {
+  # generate X
+  X <- generate_X(300, 700, Sigma = Sigma)
+  # store with iteration
+  FDR_int = rep(0,20)
+  TPR_int = rep(0,20)
+  ARISK_int = rep(0,20)
+  # test
+  for (j in c(1:20)) {
+    # generate beta
+    index <- cbind(sample(c(1:700),50,replace = F),sample(c(-1,1),50,replace = T))
+    beta <- rep(0,700)
+    beta[index[,1]] <- 1*index[,2]
+    # generate Y
+    Y <- X%*%beta+as.matrix(rnorm(300,0,1))
+    # conduct the algorithm
+    estimate <- myiht2(X, Y, proj_size = S[i], expan_size = 100, beta0=rep(0,700))$dir_estimate
+    # compute betahat
+    betahat = rep(0,700)
+    Xs <- X[, estimate[,1]]
+    betahat[estimate[,1]] = solve(t(Xs) %*% Xs) %*% t(Xs) %*% Y
+    # compute the metrics
+    FDR_int[j] = TPR_FDR(index, estimate)$FDR
+    TPR_int[j] = TPR_FDR(index, estimate)$TPR
+    ARISK_int[j] = log(ab_risk(beta_hat = betahat, beta0 = beta, Sigma = Sigma),10)
+  }
+  # store the results
+  result8_model[i,3] <- mean(FDR_int)
+  result8_model[i,4] <- sd(FDR_int)/sqrt(20)
+  result8_model[i+50,3] <- mean(TPR_int)
+  result8_model[i+50,4] <- sd(TPR_int)/sqrt(20)
+  result8_pre[i,3] <- mean(ARISK_int)
+  result8_pre[i,4] <- sd(ARISK_int)/sqrt(20)
+  print(result8_model)
+}
+
+
+
+
+```
+
+
+
+
+#### PLOTS
+```{r}
+p1A<-ggplot(result1_model, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("FDR-TPR path")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p1B<-ggplot(result1_pre, aes(x=Sparsity, y=sd,colour = measure)) + 
+    geom_errorbar(aes(ymin=sd-mean, ymax=sd+mean), width=.1) +
+    geom_line() +
+    geom_point() + 
+  ggtitle("Absolute Risk v.s. Sparsity")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('log(AR)')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p2A<-ggplot(result2_model, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("FDR-TPR path")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p2B<-ggplot(result2_pre, aes(x=Sparsity, y=mean,colour = measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + 
+  ggtitle("Absolute Risk v.s. Sparsity")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('log(AR)')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+p3A<-ggplot(result3_model, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle('FDR-TPR path')+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p3B<-ggplot(result3_pre, aes(x=Sparsity, y=mean,colour = measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + 
+  ggtitle("Absolute Risk v.s. Sparsity")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('log(AR)')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+p4A<-ggplot(result4_model, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("FDR-TPR path")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p4B<-ggplot(result4_pre, aes(x=Sparsity, y=mean,colour = measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + 
+  ggtitle("Absolute Risk v.s. Sparsity")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('log(AR)')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+
+p5A<-ggplot(result5_model, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("FDR-TPR path")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p5B<-ggplot(result5_pre, aes(x=Sparsity, y=mean,colour = measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + 
+  ggtitle("Absolute Risk v.s. Sparsity")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('log(AR)')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+p6A<-ggplot(result6_model, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("FDR-TPR path")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p6B<-ggplot(result6_pre, aes(x=Sparsity, y=mean,colour = measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + 
+  ggtitle("Absolute Risk v.s. Sparsity")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('log(AR)')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+
+p7A<-ggplot(result7_model, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("FDR-TPR path")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+p7B<-ggplot(result7_pre, aes(x=Sparsity, y=mean,colour = measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + 
+  ggtitle("Absolute Risk v.s. Sparsity")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('log(AR)')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+p8A<-ggplot(result8_model, aes(x=Sparsity, y=mean, colour=measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + ggtitle("FDR-TPR path")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('FDR and TPR')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+p8B<-ggplot(result8_pre, aes(x=Sparsity, y=mean,colour = measure)) + 
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+    geom_line() +
+    geom_point() + 
+  ggtitle("Absolute Risk v.s. Sparsity")+theme(plot.title = element_text(hjust = 0.5))+xlab('Sparsity')+ylab('log(AR)')+ theme(panel.grid.major =element_blank(), panel.grid.minor = element_blank(),  panel.background = element_blank(),axis.line = element_line(colour = "black"))+ guides(fill=guide_legend(title=NULL))
+
+
+```

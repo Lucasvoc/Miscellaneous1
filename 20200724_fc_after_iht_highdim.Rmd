@@ -1,0 +1,809 @@
+---
+title: "fc_after_iht_highdim"
+author: "WU,SHIHAO"
+date: "2020/7/22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knockoff)
+library(ggplot2)
+```
+
+## Function to generate circulant correlated multivariate Gaussian
+```{r }
+cor_matrix<-function(rho,p){
+  cor_matrix<-diag(p)
+  for (i in c(1:p)){
+    for (j in c(1:p)) {
+      cor_matrix[i,j]<-rho^(abs(i-j))
+    }
+  }
+  return(cor_matrix)
+}
+
+generate_X<-function(n,p,rho){
+  X<-matrix(0,nrow=n,ncol=p)
+  Sigma<-cor_matrix(rho,p)
+  Q<-eigen(Sigma)$vectors
+  Lambda<-diag(eigen(Sigma)$values)
+  Lambda_root<-Lambda^(1/2)
+  Sigma_root<-Q%*%Lambda_root%*%t(Q)
+  for (i in c(1:n)){
+    X[i,]<-rnorm(p,0,1)%*%Sigma_root
+  }
+  return(X)
+}
+
+
+```
+
+## Functions to calculate TPR and FDR
+```{r }
+TPR_FDR<-function(true_supp,estimated_supp){
+  S<-length(true_supp)
+  P<-length(estimated_supp)
+  TP<-as.numeric(is.element(estimated_supp, true_supp))
+  TP<-length(which(TP!=0))
+  FDR<-(P-TP)/P
+  TPR<-TP/S
+  TPR_FDR=list(TPR=TPR,FDR=FDR)
+  return(TPR_FDR)
+}
+
+```
+
+## Function to conduct FC after IHT
+```{r }
+iht_cor2 <- function(X, Y, scale_X=TRUE, s_list, g_list, beta0, maxiter = 1e3, prec = 1e-7, eta=.1){
+    # iht_grad_recruiter: iterative hard thresholding with correction for linear regression
+    n = dim(X)[1]
+    p = dim(X)[2]
+    if (scale_X) 
+        X = scale(X)
+    Sxx = t(X) %*% X / n
+    Sxy = t(X) %*% Y / n
+    s_list_len = length(s_list)
+    steps_list = rep(0, s_list_len)
+    beta_iht_cor = matrix(0, nrow=p, ncol=s_list_len)
+    grad_iht_cor = matrix(0, nrow=p, ncol=s_list_len)
+
+    for (k in 1:s_list_len){
+        s_iht = s_list[k]
+        g_iht = g_list[k]
+        t = 0
+        betat = beta0
+        while (t < maxiter){
+            beta_old = betat
+            grad = - Sxy + Sxx %*% beta_old
+            indt1 = which(beta_old != 0)
+            grad_1 = grad
+            #grad_1[indt1] = 0   # ?????
+            grad_sort = sort(abs(grad_1), decreasing=TRUE)
+            indt2 = which(abs(grad_1) >= grad_sort[g_iht])
+            indt = union(indt1, indt2)
+            
+            # refit 1
+            if (length(indt)!=0){
+                Xt = X[, indt]
+                betat = rep(0, p)
+                betat[indt] = solve(t(Xt) %*% Xt) %*% (t(Xt) %*% Y)
+            }
+                
+            # truncation 
+            betat_sort = sort(abs(betat), decreasing=TRUE)
+            indt0 = which(abs(betat) >= betat_sort[s_iht])
+            
+            # refit 2
+            if (length(indt0) !=0){
+                Xt0 = X[, indt0]
+                betat = rep(0, p)
+                betat[indt0] = solve(t(Xt0) %*% Xt0) %*% (t(Xt0) %*% Y)
+            }
+            
+            # identify convergence condition
+            if (sum((betat - beta_old)^2) < prec * (sum((beta_old)^2) + 1)) 
+                break
+            t = t + 1
+        }
+        beta_iht_cor[, k] = betat
+        grad_iht_cor[, k] = - Sxy + Sxx %*% betat
+        steps_list[k] = t
+    }
+
+    iht_cor_result = list(beta=beta_iht_cor, grad= grad_iht_cor, steps_list=steps_list,indt=indt)
+    return(iht_cor_result)
+}
+
+
+fc_after_iht<-function(X,Y, scale_X=TRUE,k,q){
+  if (scale_X==TRUE)
+    X=scale(X)
+  n<-dim(X)[1]
+  p<-dim(X)[2]
+  first_estimate<-iht_cor2(X, Y, scale_X=TRUE, s_list=c(k, 100), g_list=c(k,100), beta0=rep(0,p), maxiter = 1e3, prec = 1e-7, eta=.1)$indt
+  first_estimate<-sort(first_estimate)
+  sparsity_hat<-length(first_estimate)
+  Sxx_inverse<-solve(t(X[,first_estimate])%*%X[,first_estimate])
+  beta_hat<-Sxx_inverse%*%t(X[,first_estimate])%*%Y
+# Estimate variance
+  residual<-Y-X[,first_estimate]%*%beta_hat
+  sigma_hat<-sqrt(t(residual)%*%residual/(n-sparsity_hat))
+# Construct statistics
+  diag_Sxx_inverse<-sqrt(diag(Sxx_inverse))  
+  T_statistics<-beta_hat/diag_Sxx_inverse/as.numeric(sigma_hat)
+# Find the threshold 1: list the T-statistics
+  Test_list<-cbind(first_estimate,T_statistics)
+  Test_list<-Test_list[order(abs(Test_list[,2])),]
+# Select threshold t0
+  threshold_count<-0
+  for (i in c(1:(sparsity_hat-1))){
+    t<-abs(Test_list[i,2])
+    if (2*sparsity_hat*(1-pnorm(t,0,1))/(sparsity_hat-i) <= q)
+      break
+    threshold_count<-threshold_count+1
+  }
+# The case when the selection failed
+  if (threshold_count==sparsity_hat-1){
+    t<-sqrt(4*log(sparsity_hat))
+    count=0
+    for (i in c(1:sparsity_hat)){
+      if (Test_list[i,2]>=t){
+        break
+      }
+      count<-count+1
+    }
+    final_estimate<-Test_list[count:sparsity_hat,1]
+    sign_estimate<-sign(Test_list[count:sparsity_hat,2])
+    result<-list(estimated_supp=final_estimate,estimated_sign=sign_estimate)
+    return(result)
+  }
+# Return the chosen ones
+  final_estimate<-Test_list[threshold_count:sparsity_hat,1]
+  sign_estimate<-sign(Test_list[threshold_count:sparsity_hat,2])
+  result<-list(estimated_supp=final_estimate,estimated_sign=sign_estimate)
+  return(result)
+}
+
+fc_after_iht2<-function(X,Y, scale_X=TRUE,k,a=4){
+  if (scale_X==TRUE)
+    X=scale(X)
+  n<-dim(X)[1]
+  p<-dim(X)[2]
+  first_estimate<-iht_cor2(X, Y, scale_X=TRUE, s_list=c(k, 100), g_list=c(k,100), beta0=rep(0,p), maxiter = 1e3, prec = 1e-7, eta=.1)$indt
+  first_estimate<-sort(first_estimate)
+  sparsity_hat<-length(first_estimate)
+  Sxx_inverse<-solve(t(X[,first_estimate])%*%X[,first_estimate])
+  beta_hat<-Sxx_inverse%*%t(X[,first_estimate])%*%Y
+# Estimate variance
+  residual<-Y-X[,first_estimate]%*%beta_hat
+  sigma_hat<-sqrt(t(residual)%*%residual/(n-sparsity_hat))
+# Construct statistics
+  diag_Sxx_inverse<-sqrt(diag(Sxx_inverse))  
+  T_statistics<-beta_hat/diag_Sxx_inverse/as.numeric(sigma_hat)
+# Find the threshold 1: list the T-statistics
+  Test_list<-cbind(first_estimate,T_statistics)
+  Test_list<-Test_list[order(abs(Test_list[,2])),]
+  t<-a*sqrt(log(sparsity_hat))
+  count=1
+  for (i in c(1:sparsity_hat)){
+    if (Test_list[i,2]>=t){
+      break
+    }
+    count<-count+1
+  }
+  if(count==sparsity_hat+1){
+    count<-sparsity_hat
+  }
+  final_estimate<-Test_list[count:sparsity_hat,1]
+  sign_estimate<-sign(Test_list[count:sparsity_hat,2])
+  result<-list(estimated_supp=final_estimate,estimated_sign=sign_estimate)
+  return(result)
+}
+
+
+```
+
+
+
+```{r}
+###################################
+###################################
+###Scenario1
+
+## Scenario 1: signal amplitude
+
+A<-seq(from=0.5,to=4.5,by=0.5)
+# Construct data storage place
+result<-as.data.frame(matrix(0,nrow=9,ncol=6))
+names(result)<-c('method','Amplitude','FDR','sd_fdr','TPR','sd_tpr')
+result[1:9,1]<-'FC_after_IHT'
+result[1:9,2]<-A
+pool<-seq(1,1000,by=1) #to randomly generate beta
+for (i in c(1:length(A))){
+#generate X
+  X<-generate_X(800,1000,0.1)
+#Store results in each iteration
+  TPR_FC_int<-rep(0,50)
+  FDR_FC_int<-rep(0,50)
+#Begin the tests
+  for (j in c(1:50)){
+  #generate beta
+    index<-sample(pool,50,replace = F)
+    beta<-rep(0,1000)
+    beta[index]<-A[i]
+  #generate y
+    Y<-X%*%beta+as.matrix(rnorm(800,0,1))
+  #Conduct two algorithm
+    fc_iht_estimate<-fc_after_iht2(X,Y,k=50)$estimated_supp
+  #compute FDR and TPR
+    TPR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$TPR
+    FDR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$FDR
+  }
+  # Compute the mean and variance of the results
+  result[i,3]<-mean(FDR_FC_int)
+  result[i,4]<-sd(FDR_FC_int)
+  result[i,5]<-mean(TPR_FC_int)
+  result[i,6]<-sd(TPR_FC_int)
+  print(i)
+  print(as.matrix(result))
+}
+
+
+
+
+#####
+#####
+##Plots
+pd <- position_dodge(0.1) # move them .05 to the left and right
+
+p1<-ggplot(result, aes(x=Amplitude, y=FDR,colour=method)) + 
+    geom_errorbar(aes(ymin=FDR-sd_fdr, ymax=FDR+sd_fdr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='False discovery rate, a=4' )+ylim(0,0.5)
+
+p2<-ggplot(result, aes(x=Amplitude, y=TPR, colour=method)) + 
+    geom_errorbar(aes(ymin=TPR-sd_tpr, ymax=TPR+sd_tpr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='Power, a=4')+ylim(0,1.2)
+
+p1
+p2
+
+
+##############################
+##############################
+###Scenario2
+
+rho<-seq(from=0.1,to=0.8,by=0.05)
+# Construct data storage place
+result1<-as.data.frame(matrix(0,nrow=15,ncol=6))
+names(result1)<-c('method','Correlation','FDR','sd_fdr','TPR','sd_tpr')
+result1[1:15,1]<-'FC_after_IHT'
+result1[1:15,2]<-rho
+pool<-seq(1,1000,by=1) #to randomly generate beta
+for (i in c(1:length(rho))){
+#generate X
+  X<-generate_X(800,1000,rho[i])
+#Store results in each iteration
+  TPR_FC_int<-rep(0,50)
+  FDR_FC_int<-rep(0,50)
+#Begin the tests
+  for (j in c(1:50)){
+  #generate beta
+    index<-sample(pool,50,replace = F)
+    beta<-rep(0,1000)
+    beta[index]<-4.5
+  #generate y
+    Y<-X%*%beta+as.matrix(rnorm(800,0,1))
+  #Conduct two algorithm
+    fc_iht_estimate<-fc_after_iht2(X,Y,k=50)$estimated_supp
+  #compute FDR and TPR
+    TPR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$TPR
+    FDR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$FDR
+  }
+  # Compute the mean and variance of the results
+  result1[i,3]<-mean(FDR_FC_int)
+  result1[i,4]<-sd(FDR_FC_int)
+  result1[i,5]<-mean(TPR_FC_int)
+  result1[i,6]<-sd(TPR_FC_int)
+  print(i)
+  print(as.matrix(result1))
+}
+
+
+
+
+#####
+#####
+##Plots
+pd <- position_dodge(0.1) # move them .05 to the left and right
+
+p3<-ggplot(result1, aes(x=Correlation, y=FDR, colour=method) )+ 
+    geom_errorbar(aes(ymin=FDR-sd_fdr, ymax=FDR+sd_fdr), width=.1) +
+    geom_line() +
+    geom_point() + labs(title='False discovery rate, a=4')+ylim(0,0.5)
+
+p4<-ggplot(result1, aes(x=Correlation, y=TPR, colour=method),position=pd) + 
+    geom_errorbar(aes(ymin=TPR-sd_tpr, ymax=TPR+sd_tpr), width=.1,position=pd) +
+    geom_line() +
+    geom_point() + labs(title='Power, a=4')+ylim(0,1.2)+
+    scale_shape_manual(values = c(19, 17))
+
+p3
+p4
+
+
+
+#############################################
+#############################################
+#############################################
+### Scenario3
+
+
+k<-seq(from=10,to=100,by=5)
+# Construct data storage place
+result2<-as.data.frame(matrix(0,nrow=19,ncol=6))
+names(result2)<-c('method','Sparsity','FDR','sd_fdr','TPR','sd_tpr')
+result2[1:19,1]<-'FC-after-IHT'
+result2[1:19,2]<-k
+pool<-seq(1,1000,by=1) #to randomly generate beta
+for (i in c(1:length(k))){
+#generate X
+  X<-generate_X(800,1000,0.1)
+#Store results in each iteration
+  TPR_FC_int<-rep(0,50)
+  FDR_FC_int<-rep(0,50)
+#Begin the tests
+  for (j in c(1:50)){
+  #generate beta
+    index<-sample(pool,k[i],replace = F)
+    beta<-rep(0,1000)
+    beta[index]<-4.5
+  #generate y
+    Y<-X%*%beta+as.matrix(rnorm(800,0,1))
+  #Conduct two algorithm
+    fc_iht_estimate<-fc_after_iht2(X,Y,k=k[i])$estimated_supp
+  #compute FDR and TPR
+    TPR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$TPR
+    FDR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$FDR
+  }
+  # Compute the mean and variance of the results
+  result2[i,3]<-mean(FDR_FC_int)
+  result2[i,4]<-sd(FDR_FC_int)
+  result2[i,5]<-mean(TPR_FC_int)
+  result2[i,6]<-sd(TPR_FC_int)
+  print(i)
+  print(as.matrix(result2))
+}
+
+
+
+
+#####
+#####
+##Plots
+pd <- position_dodge(0.1) # move them .05 to the left and right
+
+p5<-ggplot(result2, aes(x=Sparsity, y=FDR, colour=method)) + 
+    geom_errorbar(aes(ymin=FDR-sd_fdr, ymax=FDR+sd_fdr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='False discovery rate, a=4')+ylim(0,0.5)
+
+p6<-ggplot(result2, aes(x=Sparsity, y=TPR, colour=method)) + 
+    geom_errorbar(aes(ymin=TPR-sd_tpr, ymax=TPR+sd_tpr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='Power, a=4')+ylim(0.8,1.05)
+
+p5
+p6
+
+
+
+
+
+
+#######################
+#######################
+#######################
+#######################
+#######################
+#######################
+#######################
+
+
+###################################
+###################################
+###Scenario1
+
+## Scenario 1: signal amplitude
+
+A<-seq(from=0.5,to=4.5,by=0.5)
+# Construct data storage place
+result<-as.data.frame(matrix(0,nrow=9,ncol=6))
+names(result)<-c('method','Amplitude','FDR','sd_fdr','TPR','sd_tpr')
+result[1:9,1]<-'FC_after_IHT'
+result[1:9,2]<-A
+pool<-seq(1,1000,by=1) #to randomly generate beta
+for (i in c(1:length(A))){
+#generate X
+  X<-generate_X(800,1000,0.1)
+#Store results in each iteration
+  TPR_FC_int<-rep(0,50)
+  FDR_FC_int<-rep(0,50)
+#Begin the tests
+  for (j in c(1:50)){
+  #generate beta
+    index<-sample(pool,50,replace = F)
+    beta<-rep(0,1000)
+    beta[index]<-A[i]
+  #generate y
+    Y<-X%*%beta+as.matrix(rnorm(800,0,1))
+  #Conduct two algorithm
+    fc_iht_estimate<-fc_after_iht2(X,Y,k=50,a=6)$estimated_supp
+  #compute FDR and TPR
+    TPR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$TPR
+    FDR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$FDR
+  }
+  # Compute the mean and variance of the results
+  result[i,3]<-mean(FDR_FC_int)
+  result[i,4]<-sd(FDR_FC_int)
+  result[i,5]<-mean(TPR_FC_int)
+  result[i,6]<-sd(TPR_FC_int)
+  print(i)
+  print(as.matrix(result))
+}
+
+
+
+
+#####
+#####
+##Plots
+pd <- position_dodge(0.1) # move them .05 to the left and right
+
+p6_1<-ggplot(result, aes(x=Amplitude, y=FDR,colour=method)) + 
+    geom_errorbar(aes(ymin=FDR-sd_fdr, ymax=FDR+sd_fdr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='False discovery rate, a=6' )+ylim(0,0.5)
+
+p6_2<-ggplot(result, aes(x=Amplitude, y=TPR, colour=method)) + 
+    geom_errorbar(aes(ymin=TPR-sd_tpr, ymax=TPR+sd_tpr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='Power, a=6')+ylim(0,1.2)
+
+p6_1
+p6_2
+
+
+##############################
+##############################
+###Scenario2
+
+rho<-seq(from=0.1,to=0.8,by=0.05)
+# Construct data storage place
+result1<-as.data.frame(matrix(0,nrow=15,ncol=6))
+names(result1)<-c('method','Correlation','FDR','sd_fdr','TPR','sd_tpr')
+result1[1:15,1]<-'FC_after_IHT'
+result1[1:15,2]<-rho
+pool<-seq(1,1000,by=1) #to randomly generate beta
+for (i in c(1:length(rho))){
+#generate X
+  X<-generate_X(800,1000,rho[i])
+#Store results in each iteration
+  TPR_FC_int<-rep(0,50)
+  FDR_FC_int<-rep(0,50)
+#Begin the tests
+  for (j in c(1:50)){
+  #generate beta
+    index<-sample(pool,50,replace = F)
+    beta<-rep(0,1000)
+    beta[index]<-4.5
+  #generate y
+    Y<-X%*%beta+as.matrix(rnorm(800,0,1))
+  #Conduct two algorithm
+    fc_iht_estimate<-fc_after_iht2(X,Y,k=50,a=6)$estimated_supp
+  #compute FDR and TPR
+    TPR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$TPR
+    FDR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$FDR
+  }
+  # Compute the mean and variance of the results
+  result1[i,3]<-mean(FDR_FC_int)
+  result1[i,4]<-sd(FDR_FC_int)
+  result1[i,5]<-mean(TPR_FC_int)
+  result1[i,6]<-sd(TPR_FC_int)
+  print(i)
+  print(as.matrix(result1))
+}
+
+
+
+
+#####
+#####
+##Plots
+pd <- position_dodge(0.1) # move them .05 to the left and right
+
+p6_3<-ggplot(result1, aes(x=Correlation, y=FDR, colour=method) )+ 
+    geom_errorbar(aes(ymin=FDR-sd_fdr, ymax=FDR+sd_fdr), width=.1) +
+    geom_line() +
+    geom_point() + labs(title='False discovery rate, a=6')+ylim(0,0.5)
+
+p6_4<-ggplot(result1, aes(x=Correlation, y=TPR, colour=method),position=pd) + 
+    geom_errorbar(aes(ymin=TPR-sd_tpr, ymax=TPR+sd_tpr), width=.1,position=pd) +
+    geom_line() +
+    geom_point() + labs(title='Power, a=6')+ylim(0,1.2)+
+    scale_shape_manual(values = c(19, 17))
+
+
+
+#############################################
+#############################################
+#############################################
+### Scenario3
+
+
+k<-seq(from=10,to=100,by=5)
+# Construct data storage place
+result2<-as.data.frame(matrix(0,nrow=19,ncol=6))
+names(result2)<-c('method','Sparsity','FDR','sd_fdr','TPR','sd_tpr')
+result2[1:19,1]<-'FC-after-IHT'
+result2[1:19,2]<-k
+pool<-seq(1,1000,by=1) #to randomly generate beta
+for (i in c(1:length(k))){
+#generate X
+  X<-generate_X(800,1000,0.1)
+#Store results in each iteration
+  TPR_FC_int<-rep(0,50)
+  FDR_FC_int<-rep(0,50)
+#Begin the tests
+  for (j in c(1:50)){
+  #generate beta
+    index<-sample(pool,k[i],replace = F)
+    beta<-rep(0,1000)
+    beta[index]<-4.5
+  #generate y
+    Y<-X%*%beta+as.matrix(rnorm(800,0,1))
+  #Conduct two algorithm
+    fc_iht_estimate<-fc_after_iht2(X,Y,k=k[i],a=6)$estimated_supp
+  #compute FDR and TPR
+    TPR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$TPR
+    FDR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$FDR
+  }
+  # Compute the mean and variance of the results
+  result2[i,3]<-mean(FDR_FC_int)
+  result2[i,4]<-sd(FDR_FC_int)
+  result2[i,5]<-mean(TPR_FC_int)
+  result2[i,6]<-sd(TPR_FC_int)
+  print(i)
+  print(as.matrix(result2))
+}
+
+
+
+
+#####
+#####
+##Plots
+pd <- position_dodge(0.1) # move them .05 to the left and right
+
+p6_5<-ggplot(result2, aes(x=Sparsity, y=FDR, colour=method)) + 
+    geom_errorbar(aes(ymin=FDR-sd_fdr, ymax=FDR+sd_fdr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='False discovery rate, a=6')+ylim(0,0.5)
+
+p6_6<-ggplot(result2, aes(x=Sparsity, y=TPR, colour=method)) + 
+    geom_errorbar(aes(ymin=TPR-sd_tpr, ymax=TPR+sd_tpr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='Power, a=6')+ylim(0.8,1.05)
+
+```
+
+
+
+
+
+
+
+
+```{r}
+#######################
+#######################
+#######################
+#######################
+#######################
+#######################
+#######################
+
+
+###################################
+###################################
+###Scenario1
+
+## Scenario 1: signal amplitude
+
+A<-seq(from=0.5,to=4.5,by=0.5)
+# Construct data storage place
+result<-as.data.frame(matrix(0,nrow=9,ncol=6))
+names(result)<-c('method','Amplitude','FDR','sd_fdr','TPR','sd_tpr')
+result[1:9,1]<-'FC_after_IHT'
+result[1:9,2]<-A
+pool<-seq(1,1000,by=1) #to randomly generate beta
+for (i in c(1:length(A))){
+#generate X
+  X<-generate_X(800,1000,0.1)
+#Store results in each iteration
+  TPR_FC_int<-rep(0,50)
+  FDR_FC_int<-rep(0,50)
+#Begin the tests
+  for (j in c(1:50)){
+  #generate beta
+    index<-sample(pool,50,replace = F)
+    beta<-rep(0,1000)
+    beta[index]<-A[i]
+  #generate y
+    Y<-X%*%beta+as.matrix(rnorm(800,0,1))
+  #Conduct two algorithm
+    fc_iht_estimate<-fc_after_iht2(X,Y,k=50,a=8)$estimated_supp
+  #compute FDR and TPR
+    TPR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$TPR
+    FDR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$FDR
+  }
+  # Compute the mean and variance of the results
+  result[i,3]<-mean(FDR_FC_int)
+  result[i,4]<-sd(FDR_FC_int)
+  result[i,5]<-mean(TPR_FC_int)
+  result[i,6]<-sd(TPR_FC_int)
+  print(i)
+  print(as.matrix(result))
+}
+
+
+
+
+#####
+#####
+##Plots
+pd <- position_dodge(0.1) # move them .05 to the left and right
+
+p8_1<-ggplot(result, aes(x=Amplitude, y=FDR,colour=method)) + 
+    geom_errorbar(aes(ymin=FDR-sd_fdr, ymax=FDR+sd_fdr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='False discovery rate, a=8' )+ylim(0,0.5)
+
+p8_2<-ggplot(result, aes(x=Amplitude, y=TPR, colour=method)) + 
+    geom_errorbar(aes(ymin=TPR-sd_tpr, ymax=TPR+sd_tpr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='Power, a=8')+ylim(0,1.2)
+
+
+
+##############################
+##############################
+###Scenario2
+
+rho<-seq(from=0.1,to=0.8,by=0.05)
+# Construct data storage place
+result1<-as.data.frame(matrix(0,nrow=15,ncol=6))
+names(result1)<-c('method','Correlation','FDR','sd_fdr','TPR','sd_tpr')
+result1[1:15,1]<-'FC_after_IHT'
+result1[1:15,2]<-rho
+pool<-seq(1,1000,by=1) #to randomly generate beta
+for (i in c(1:length(rho))){
+#generate X
+  X<-generate_X(800,1000,rho[i])
+#Store results in each iteration
+  TPR_FC_int<-rep(0,50)
+  FDR_FC_int<-rep(0,50)
+#Begin the tests
+  for (j in c(1:50)){
+  #generate beta
+    index<-sample(pool,50,replace = F)
+    beta<-rep(0,1000)
+    beta[index]<-4.5
+  #generate y
+    Y<-X%*%beta+as.matrix(rnorm(800,0,1))
+  #Conduct two algorithm
+    fc_iht_estimate<-fc_after_iht2(X,Y,k=50,a=8)$estimated_supp
+  #compute FDR and TPR
+    TPR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$TPR
+    FDR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$FDR
+  }
+  # Compute the mean and variance of the results
+  result1[i,3]<-mean(FDR_FC_int)
+  result1[i,4]<-sd(FDR_FC_int)
+  result1[i,5]<-mean(TPR_FC_int)
+  result1[i,6]<-sd(TPR_FC_int)
+  print(i)
+  print(as.matrix(result1))
+}
+
+
+
+
+#####
+#####
+##Plots
+pd <- position_dodge(0.1) # move them .05 to the left and right
+
+p8_3<-ggplot(result1, aes(x=Correlation, y=FDR, colour=method) )+ 
+    geom_errorbar(aes(ymin=FDR-sd_fdr, ymax=FDR+sd_fdr), width=.1) +
+    geom_line() +
+    geom_point() + labs(title='False discovery rate, a=8')+ylim(0,0.5)
+
+p8_4<-ggplot(result1, aes(x=Correlation, y=TPR, colour=method),position=pd) + 
+    geom_errorbar(aes(ymin=TPR-sd_tpr, ymax=TPR+sd_tpr), width=.1,position=pd) +
+    geom_line() +
+    geom_point() + labs(title='Power, a=8')+ylim(0,1.2)+
+    scale_shape_manual(values = c(19, 17))
+
+
+
+#############################################
+#############################################
+#############################################
+### Scenario3
+
+
+k<-seq(from=10,to=100,by=5)
+# Construct data storage place
+result2<-as.data.frame(matrix(0,nrow=19,ncol=6))
+names(result2)<-c('method','Sparsity','FDR','sd_fdr','TPR','sd_tpr')
+result2[1:19,1]<-'FC-after-IHT'
+result2[1:19,2]<-k
+pool<-seq(1,1000,by=1) #to randomly generate beta
+for (i in c(1:length(k))){
+#generate X
+  X<-generate_X(800,1000,0.1)
+#Store results in each iteration
+  TPR_FC_int<-rep(0,50)
+  FDR_FC_int<-rep(0,50)
+#Begin the tests
+  for (j in c(1:50)){
+  #generate beta
+    index<-sample(pool,k[i],replace = F)
+    beta<-rep(0,1000)
+    beta[index]<-4.5
+  #generate y
+    Y<-X%*%beta+as.matrix(rnorm(800,0,1))
+  #Conduct two algorithm
+    fc_iht_estimate<-fc_after_iht2(X,Y,k=k[i],a=8)$estimated_supp
+  #compute FDR and TPR
+    TPR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$TPR
+    FDR_FC_int[j]<-TPR_FDR(index,fc_iht_estimate)$FDR
+  }
+  # Compute the mean and variance of the results
+  result2[i,3]<-mean(FDR_FC_int)
+  result2[i,4]<-sd(FDR_FC_int)
+  result2[i,5]<-mean(TPR_FC_int)
+  result2[i,6]<-sd(TPR_FC_int)
+  print(i)
+  print(as.matrix(result2))
+}
+
+
+
+
+#####
+#####
+##Plots
+pd <- position_dodge(0.1) # move them .05 to the left and right
+
+p8_5<-ggplot(result2, aes(x=Sparsity, y=FDR, colour=method)) + 
+    geom_errorbar(aes(ymin=FDR-sd_fdr, ymax=FDR+sd_fdr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='False discovery rate, a=8')+ylim(0,0.5)
+
+p8_6<-ggplot(result2, aes(x=Sparsity, y=TPR, colour=method)) + 
+    geom_errorbar(aes(ymin=TPR-sd_tpr, ymax=TPR+sd_tpr), width=.1, position=pd) +
+    geom_line(position=pd) +
+    geom_point(position=pd) + labs(title='Power, a=8')+ylim(0.8,1.05)
+
+
+
+
+```
+
+
+
